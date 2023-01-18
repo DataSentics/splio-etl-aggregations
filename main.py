@@ -58,7 +58,13 @@ display(spark.read.table('splio.purchases'))
 
 ##### CLIENT SETUP
 
-# todo extra fields from client table
+# column name: default value
+additional_customer_fields = {
+  'date_premier_achat': '1900-01-01',
+  'optin_email': False,
+  'optin_sms': False,
+  'age': 0,
+}
 
 periods = [
   ('Y', 100)
@@ -72,7 +78,7 @@ restricted_periods = [
 
 #format: dict(category => whitelisted values)
 primary_product_categories = {
-  # 'famille': ['famille_129', 'famille_132'],
+  'famille': ['famille_129', 'famille_132'],
   'categorie': []
 }
 secondary_product_categories = {
@@ -114,26 +120,29 @@ DEFAULT_FILTERS = [
 ###              can be empty (first level of aggregation is by default on 'uid' field)
 ### agg_def: tuple of (target_column, pyspark aggregation function))
 ### extra_filters: list of where conditions for applying extra filters (default filter is always applied)
+
+### fe. this will result in ca_category_{category_name}_{period} columns
 AGGREGATIONS = [
-  ##### restricted_periods
-  # ('ca', restricted_periods, {}, DEFAULT_AGGREGATION, []),
-  # ('ca_category', restricted_periods, primary_product_categories, DEFAULT_AGGREGATION, []), # fe. this will result in ca_category_{category_name}_{period} columns
+  ##### restricted_periods ######
+  ## primary product categories
+  # ('ca_category', restricted_periods, primary_product_categories, DEFAULT_AGGREGATION, []), 
+  # ## secondary product categories
   # ('ca_category', restricted_periods, secondary_product_categories, DEFAULT_AGGREGATION, []),
   # ('ca_attribute', restricted_periods, product_attributes, DEFAULT_AGGREGATION, []),
-  # ('nb_purchase_dates', restricted_periods, {}, ('datetime', F.countDistinct), []),
-  # ('nb_purchase_dates_category_', restricted_periods, primary_product_categories, ('datetime', F.countDistinct), []),
-  # ('nb_purchase_dates_attribute_', restricted_periods, product_attributes, ('datetime', F.countDistinct), []),
-  # ('quantity', restricted_periods, {}, ('quantity', F.sum), [F.col('quantity') > 0]),
+  # ('nb_purchase_dates_category', restricted_periods, primary_product_categories, ('datetime', F.countDistinct), []),
+  # ('nb_purchase_dates_attribute', restricted_periods, product_attributes, ('datetime', F.countDistinct), []),
   # ('nb_distinct_products', restricted_periods, {}, ('product_id', F.countDistinct), []),
-  # ('nb_purchase_dates_web', restricted_periods, {}, ('datetime', F.countDistinct), [F.col('point_of_sales').isin(web_points_of_sales)]), # only bought in web stores
-  # ('nb_purchase_dates_store', restricted_periods, {}, ('datetime', F.countDistinct), [~F.col('point_of_sales').isin(web_points_of_sales)]), # not bought in web stores
+  # ## only bought in web stores
+  # ('nb_purchase_dates_web', restricted_periods, {}, ('datetime', F.countDistinct), [F.col('point_of_sales').isin(web_points_of_sales)]),
+  # ## not bought in web stores
+  # ('nb_purchase_dates_store', restricted_periods, {}, ('datetime', F.countDistinct), [~F.col('point_of_sales').isin(web_points_of_sales)]), 
   # ('last_purchase_date', restricted_periods, {}, ('datetime', F.max), []),
   # ('last_purchase_date_category', restricted_periods, primary_product_categories, ('datetime', F.max), []),
   
-  ##### periods
-  ('ca', periods, {}, DEFAULT_AGGREGATION, []),
-  ('nb_purchase_dates', periods, {}, ('datetime', F.countDistinct), []),
-  ('quantity', periods, {}, ('quantity', F.sum), [F.col('quantity') > 0]),
+  # ##### periods ######
+  # ('ca', periods, {}, DEFAULT_AGGREGATION, []),
+  # ('nb_purchase_dates', periods, {}, ('datetime', F.countDistinct), []),
+  # ('quantity', periods, {}, ('quantity', F.sum), [F.col('quantity') > 0]),
 ]
 
 # original definitions that are missing
@@ -182,7 +191,7 @@ for column_prefix, periods, agg_columns, agg_def, extra_filters in AGGREGATIONS:
           .groupBy(group_cols).agg(agg_def[1](agg_def[0]).cast('double').alias('value')) # group by and call aggregation function on specified col
           .withColumn('aggregation', F.concat( # name the column
             F.lit(column_prefix), F.lit('_'),
-            F.col(agg_col) if agg_col else F.lit("") ,
+            F.col(agg_col) if agg_col else F.lit(""),
             F.lit('_') if agg_col else F.lit(""),
             F.lit(f'{period_name}{period_n}'))
           )
@@ -193,11 +202,17 @@ for column_prefix, periods, agg_columns, agg_def, extra_filters in AGGREGATIONS:
 
       res_df = res_df.union(rdf) if res_df else rdf # append to the dataframe
 
+res_df = res_df.groupBy('uid').pivot('aggregation').agg(F.first('value')) # pivot table (except uid)
+
+select_fields = [PRIMARY_AGGREGATION_FIELD] + list(additional_customer_fields.keys())
+clients = spark.read.table('splio.clients').select(select_fields).na.fill(additional_customer_fields)
+
+res_df = res_df.join(clients, ['uid'])
+
 display(res_df.where(F.col('uid') == '746991')) # check for single user (with most purchases)
-# res_df = res_df.groupBy('uid').pivot('aggregation').agg(F.first('value')) # pivot table (except uid)
 # display(res_df.where(F.col('uid') == '608685'))
 
-# todo: extra columns from client table
+
 # todo: finalize all original aggregations on checklist
 
 ###### questions
@@ -207,13 +222,8 @@ display(res_df.where(F.col('uid') == '746991')) # check for single user (with mo
 
 # COMMAND ----------
 
-for i in {}.items():
-  print(i)
 
-# COMMAND ----------
-
-for i in {}.items():
-  print(i)
+display(clients)
 
 # COMMAND ----------
 
