@@ -2,7 +2,6 @@
 import pyspark.sql.functions as F
 from pyspark.sql.window import Window
 
-
 # COMMAND ----------
 
 PROJECT_DIR = 'dbfs:/splio/d-centric/'
@@ -57,6 +56,31 @@ display(spark.read.table('splio.purchases'))
 
 # COMMAND ----------
 
+##### CLIENT SETUP
+restricted_periods = [
+  ('Y', 1),
+  ('W', 1),
+  ('W', 5)
+]
+
+primary_product_categories = [
+  'famille',
+  'categorie'
+]
+secondary_product_categories = [
+  'famille',
+  'categorie'
+]
+product_attributes = [
+  'couleur'
+]
+web_points_of_sales = [
+  100
+]
+computing_date = '2023-01-01'
+
+##### GLOBAL SETUP
+
 # period_name : period length in days
 PERIOD_LENGTHS_DAY = {
   'Y': 365,
@@ -68,26 +92,39 @@ PERIOD_LENGTHS_DAY = {
 
 PRIMARY_AGGREGATION_FIELD = 'uid'
 
-# ('column_name', pyspark aggregation function) - single value now
-MAIN_AGGREGATION = ('amount_paid', F.sum)
-
-# todo implement periods with computing date
-restricted_periods = [
-  # ('Y', 1),
-  ('W', 1),
-  # ('W', 2)
+DEFAULT_AGGREGATION = ('amount_paid', F.sum)
+DEFAULT_FILTERS = [
+  F.col(DEFAULT_AGGREGATION[0]) > 0 # amount paid is positive
 ]
 
-primary_categories = ['famille']
-computing_date = '2023-01-10'
+### periods are included in every aggregation by default
+### FORMAT: (column_prefix, agg_columns, agg_def)
+### column_prefix: prefix that will be used in the column result
+### agg_columns: list of columns to use for aggregation, can be empty (first level of aggregation is by default on 'uid' field)
+### agg_def: tuple of (target_column, pyspark aggregation function))
+### extra_filters: list of where conditions for applying extra filters (default filter is always applied)
+AGGREGATIONS = [
+  ('ca', [], DEFAULT_AGGREGATION, []),
+  ('ca_category', primary_product_categories, DEFAULT_AGGREGATION, []), # fe. this will result in ca_category_{category_name}_{period} columns
+  ('ca_category', secondary_product_categories, DEFAULT_AGGREGATION, []),
+  ('ca_attribute', product_attributes, DEFAULT_AGGREGATION, []),
+  ('nb_purchase_dates', [], ('datetime', F.countDistinct), []),
+  ('nb_purchase_dates_category_', primary_product_categories, ('datetime', F.countDistinct), []),
+  ('nb_purchase_dates_attribute_', product_attributes, ('datetime', F.countDistinct), []),
+  ('quantity', [], ('quantity', F.sum), [F.col('quantity') > 0]),
+  ('nb_distinct_products', [], ('product_id', F.countDistinct), []),
+  ('last_purchase_date', [], ('datetime', F.max), []),
+]
 
-# periods are included in every aggregation by default
-# primary aggregation is by default on 'uid' 
-# column prefix ; aggregation column name(s) ; 
-AGGREGATIONS = {
-  ('ca_category', primary_categories, )
-}
+# original definitions that are missing
+#   158,3:   - name: 'nb_purchase_dates_web'
+#   173,3:   - name: 'nb_purchase_dates_store'
+#   197,3:   - name: 'top_buyer' ?????   NO PERIODD
+#   210,3:   - name: 'top_buyer_category_{{ d['field'] }}_' NO PERIODD
+#   233,3:   - name: 'last_purchase_date'.  NO PERIODD
+#   244,3:   - name: 'last_purchase_date_category_{{ d['field'] }}_'.  NO PERIOD
 
+DEBUG = True
 
 # join table with catalog and setup computing date
 catalog = spark.read.table('splio.catalog')
@@ -96,34 +133,68 @@ purchases = spark.read.table('splio.purchases')
 df = (
   purchases.join(catalog, ['product_id'])
   .withColumn('computing_date', F.to_date(F.lit(computing_date)))
-  .where(F.col(MAIN_AGGREGATION[0]) > 0) # filter out only positive values
 )
 
 res_df = None
 for period_name, period_n in restricted_periods: # across all the defined periods
-  for cat in primary_categories: # across all the primary categories
-    rdf = (
-      df
-        .filter(F.col('date').between( # filter out defined period
-          F.date_sub(F.col('computing_date'), period_n * PERIOD_LENGTHS_DAY[period_name]), # substract N * PERIOD_LENGTHS_DAY days from computing_date
-          F.col('computing_date') # until computing date (included)
-        ))
-        .groupBy(PRIMARY_AGGREGATION_FIELD, cat).agg(MAIN_AGGREGATION[1](MAIN_AGGREGATION[0]).alias('value')) # group by and calculate aggregations
-        .withColumn('category', F.concat(F.lit('ca_category_'), F.col(cat), F.lit('_'), F.lit(f'{period_name}{period_n}')))
-        .drop(cat) # drop original category for pivoting
-    )
-    # append to the dataframe
-    res_df = res_df.union(rdf) if res_df else rdf 
+  for column_prefix, agg_columns, agg_def, extra_filters in AGGREGATIONS: # across all the predefined aggregations
+    for agg_col in agg_columns if agg_columns else [None]: # perform 1 loop if there are no aggregation cols
+      group_cols = [PRIMARY_AGGREGATION_FIELD, agg_col] if agg_col else PRIMARY_AGGREGATION_FIELD
+      filters = DEFAULT_FILTERS + extra_filters
 
-display(res_df.where(F.col('uid') == '746991')) # check for single user
-# res_df = res_df.groupBy('uid').pivot('category').agg(F.first('value')) # pivot table (except uid)
-# 
-display(res_df)
+      if DEBUG:
+        print(f"Aggregating cols: {group_cols}, target: {agg_def[1].__name__}({agg_def[0]}), extra_filters: {extra_filters}, ==> {column_prefix}")
+
+      # apply filters before aggregation
+      rdf = df
+      for f in filters:
+        rdf = rdf.filter(f)
+
+      rdf = (
+        rdf
+          .filter(F.col('date').between( # filter out defined period
+            F.date_sub(F.col('computing_date'), period_n * PERIOD_LENGTHS_DAY[period_name]), # substract days from computing_date
+            F.col('computing_date') # until computing date (included)
+          ))
+          .groupBy(group_cols).agg(agg_def[1](agg_def[0]).alias('value')) # group by and call aggregation function on specified col
+          .withColumn('aggregation', F.concat( # name the column
+            F.lit(column_prefix), F.lit('_'),
+            F.col(agg_col) if agg_col else F.lit("") ,
+            F.lit('_') if agg_col else F.lit(""),
+            F.lit(f'{period_name}{period_n}'))
+          )
+      )
+      # drop original aggregation col if present (table will be pivoted)
+      if agg_col:
+        rdf = rdf.drop(agg_col) 
+
+      res_df = res_df.union(rdf) if res_df else rdf # append to the dataframe
+
+# display(res_df)
+display(res_df.where(F.col('uid') == '401421')) # check for single user (with most purchases)
+# res_df = res_df.groupBy('uid').pivot('aggregation').agg(F.first('value')) # pivot table (except uid)
+
+
+
+# todo: extra columns from client table
+
+# todo: whitelisted values of interest? > as default filter? - is it needed? no business definition include that
+# todo: point of sales filtering
+# todo: finalize all original aggregations on checklist
+# todo: restricted period vs. periods difference
+
+# COMMAND ----------
+
+
 
 # COMMAND ----------
 
 # nb_purchase_dates ()
-display(df.groupBy('uid').agg(F.countDistinct('date')))
+display(df)
+
+# COMMAND ----------
+
+display(df.groupBy('uid').agg(F.count('uid').alias('c')).sort(F.col('c').desc()))
 
 # COMMAND ----------
 
