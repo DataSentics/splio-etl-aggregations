@@ -58,26 +58,27 @@ display(spark.read.table('splio.purchases'))
 
 ##### CLIENT SETUP
 restricted_periods = [
-  ('Y', 1),
-  ('W', 1),
-  ('W', 5)
+  ('Y', 100),
+  # ('W', 1),
+  # ('W', 5)
 ]
 
-primary_product_categories = [
-  'famille',
-  'categorie'
-]
-secondary_product_categories = [
-  'famille',
-  'categorie'
-]
-product_attributes = [
-  'couleur'
-]
+#format: dict(category => whitelisted values)
+primary_product_categories = {
+  # 'famille': ['famille_129', 'famille_132'],
+  'categorie': []
+}
+secondary_product_categories = {
+  # 'famille': ['famille_129', 'famille_132'],
+  # 'categorie': []
+}
+product_attributes = {
+  'couleur': []
+}
 web_points_of_sales = [
-  100
+  17,
 ]
-computing_date = '2023-01-01'
+computing_date = '2030-01-01'
 
 ##### GLOBAL SETUP
 
@@ -100,29 +101,30 @@ DEFAULT_FILTERS = [
 ### periods are included in every aggregation by default
 ### FORMAT: (column_prefix, agg_columns, agg_def)
 ### column_prefix: prefix that will be used in the column result
-### agg_columns: list of columns to use for aggregation, can be empty (first level of aggregation is by default on 'uid' field)
+### agg_columns: dict ('col_name' => [whitelisted values]) to use for aggregation
+###              can be empty (first level of aggregation is by default on 'uid' field)
 ### agg_def: tuple of (target_column, pyspark aggregation function))
 ### extra_filters: list of where conditions for applying extra filters (default filter is always applied)
 AGGREGATIONS = [
-  ('ca', [], DEFAULT_AGGREGATION, []),
+  # ('ca', [], DEFAULT_AGGREGATION, []),
   ('ca_category', primary_product_categories, DEFAULT_AGGREGATION, []), # fe. this will result in ca_category_{category_name}_{period} columns
-  ('ca_category', secondary_product_categories, DEFAULT_AGGREGATION, []),
-  ('ca_attribute', product_attributes, DEFAULT_AGGREGATION, []),
-  ('nb_purchase_dates', [], ('datetime', F.countDistinct), []),
-  ('nb_purchase_dates_category_', primary_product_categories, ('datetime', F.countDistinct), []),
-  ('nb_purchase_dates_attribute_', product_attributes, ('datetime', F.countDistinct), []),
-  ('quantity', [], ('quantity', F.sum), [F.col('quantity') > 0]),
-  ('nb_distinct_products', [], ('product_id', F.countDistinct), []),
-  ('last_purchase_date', [], ('datetime', F.max), []),
+  # ('ca_category', secondary_product_categories, DEFAULT_AGGREGATION, []),
+  # ('ca_attribute', product_attributes, DEFAULT_AGGREGATION, []),
+  # ('nb_purchase_dates', [], ('datetime', F.countDistinct), []),
+  # ('nb_purchase_dates_category_', primary_product_categories, ('datetime', F.countDistinct), []),
+  # ('nb_purchase_dates_attribute_', product_attributes, ('datetime', F.countDistinct), []),
+  # ('quantity', [], ('quantity', F.sum), [F.col('quantity') > 0]),
+  # ('nb_distinct_products', [], ('product_id', F.countDistinct), []),
+  # ('nb_purchase_dates_web', [], ('datetime', F.countDistinct), [F.col('point_of_sales').isin(web_points_of_sales)]), # only bought in web stores
+  # ('nb_purchase_dates_store', [], ('datetime', F.countDistinct), [~F.col('point_of_sales').isin(web_points_of_sales)]), # not bought in web stores
+  # ('last_purchase_date', [], ('datetime', F.max), []),
+  # ('last_purchase_date_category', primary_product_categories, ('datetime', F.max), []),
+  # ('top_buyer', [], ('datetime', F.max), [F.col('quantity') > 0]), # not bought in web stores
 ]
 
 # original definitions that are missing
-#   158,3:   - name: 'nb_purchase_dates_web'
-#   173,3:   - name: 'nb_purchase_dates_store'
-#   197,3:   - name: 'top_buyer' ?????   NO PERIODD
-#   210,3:   - name: 'top_buyer_category_{{ d['field'] }}_' NO PERIODD
-#   233,3:   - name: 'last_purchase_date'.  NO PERIODD
-#   244,3:   - name: 'last_purchase_date_category_{{ d['field'] }}_'.  NO PERIOD
+#   197,3:   - name: 'top_buyer' NO PERIOD, PER WHOLE DATASET?, id of customer who bought the most? (volume, money?)
+#   210,3:   - name: 'top_buyer_category_{{ d['field'] }}_' SAME AS ABOVE 
 
 DEBUG = True
 
@@ -138,17 +140,22 @@ df = (
 res_df = None
 for period_name, period_n in restricted_periods: # across all the defined periods
   for column_prefix, agg_columns, agg_def, extra_filters in AGGREGATIONS: # across all the predefined aggregations
-    for agg_col in agg_columns if agg_columns else [None]: # perform 1 loop if there are no aggregation cols
+    for agg_col, whitelisted in agg_columns.items() if agg_columns else [None]: # perform 1 loop if there are no aggregation cols
+      
       group_cols = [PRIMARY_AGGREGATION_FIELD, agg_col] if agg_col else PRIMARY_AGGREGATION_FIELD
       filters = DEFAULT_FILTERS + extra_filters
 
       if DEBUG:
-        print(f"Aggregating cols: {group_cols}, target: {agg_def[1].__name__}({agg_def[0]}), extra_filters: {extra_filters}, ==> {column_prefix}")
+        print(f"PER: {period_name}{period_n}, COLS: {group_cols}, WL:{whitelisted}, TAR: {agg_def[1].__name__}({agg_def[0]}), FIL: {extra_filters}, ==> {column_prefix}")
 
       # apply filters before aggregation
       rdf = df
       for f in filters:
         rdf = rdf.filter(f)
+
+      # filter whitelisted cols (ignore if empty)
+      if whitelisted:
+        rdf = rdf.where(F.col(agg_col).isin(whitelisted))
 
       rdf = (
         rdf
@@ -156,7 +163,7 @@ for period_name, period_n in restricted_periods: # across all the defined period
             F.date_sub(F.col('computing_date'), period_n * PERIOD_LENGTHS_DAY[period_name]), # substract days from computing_date
             F.col('computing_date') # until computing date (included)
           ))
-          .groupBy(group_cols).agg(agg_def[1](agg_def[0]).alias('value')) # group by and call aggregation function on specified col
+          .groupBy(group_cols).agg(agg_def[1](agg_def[0]).cast('double').alias('value')) # group by and call aggregation function on specified col
           .withColumn('aggregation', F.concat( # name the column
             F.lit(column_prefix), F.lit('_'),
             F.col(agg_col) if agg_col else F.lit("") ,
@@ -170,27 +177,30 @@ for period_name, period_n in restricted_periods: # across all the defined period
 
       res_df = res_df.union(rdf) if res_df else rdf # append to the dataframe
 
-# display(res_df)
-display(res_df.where(F.col('uid') == '401421')) # check for single user (with most purchases)
+display(res_df.where(F.col('uid') == '746991')) # check for single user (with most purchases)
 # res_df = res_df.groupBy('uid').pivot('aggregation').agg(F.first('value')) # pivot table (except uid)
+
+# display(res_df.where(F.col('uid') == '608685'))
 
 
 
 # todo: extra columns from client table
-
-# todo: whitelisted values of interest? > as default filter? - is it needed? no business definition include that
-# todo: point of sales filtering
 # todo: finalize all original aggregations on checklist
 # todo: restricted period vs. periods difference
 
+###### questions
+# todo: fill null values??
+# todo: if there are no results found for particular aggregation for any user or period, the column will not be included in the result
+#       if there is result for at least single user, the column will be present in the final pivoted table (rest will be NULL)
+
 # COMMAND ----------
 
-
+display(df.where(F.col('uid') == '746991').where(F.col('amount_paid') > 0))
 
 # COMMAND ----------
 
 # nb_purchase_dates ()
-display(df)
+display(df.groupBy('uid', 'point_of_sales').count().groupBy('uid').count().sort(F.col('count').desc()))
 
 # COMMAND ----------
 
@@ -216,10 +226,6 @@ display(df.withColumn('a', F.sum('amount_paid').over(w)).where(F.col('uid') == '
     
   ).select('date').distinct().sort('date')
   )
-
-# COMMAND ----------
-
-"print(agg)
 
 # COMMAND ----------
 
