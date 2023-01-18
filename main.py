@@ -57,8 +57,15 @@ display(spark.read.table('splio.purchases'))
 # COMMAND ----------
 
 ##### CLIENT SETUP
+
+# todo extra fields from client table
+
+periods = [
+  ('Y', 100)
+]
+
 restricted_periods = [
-  ('Y', 100),
+  ('Y', 200),
   # ('W', 1),
   # ('W', 5)
 ]
@@ -80,6 +87,8 @@ web_points_of_sales = [
 ]
 computing_date = '2030-01-01'
 
+# todo: activity barrette? 
+
 ##### GLOBAL SETUP
 
 # period_name : period length in days
@@ -98,28 +107,33 @@ DEFAULT_FILTERS = [
   F.col(DEFAULT_AGGREGATION[0]) > 0 # amount paid is positive
 ]
 
-### periods are included in every aggregation by default
-### FORMAT: (column_prefix, agg_columns, agg_def)
+######## FORMAT: (column_prefix, agg_columns, agg_def, extra_filters)
 ### column_prefix: prefix that will be used in the column result
+### periods: aggregation periods list
 ### agg_columns: dict ('col_name' => [whitelisted values]) to use for aggregation
 ###              can be empty (first level of aggregation is by default on 'uid' field)
 ### agg_def: tuple of (target_column, pyspark aggregation function))
 ### extra_filters: list of where conditions for applying extra filters (default filter is always applied)
 AGGREGATIONS = [
-  # ('ca', [], DEFAULT_AGGREGATION, []),
-  ('ca_category', primary_product_categories, DEFAULT_AGGREGATION, []), # fe. this will result in ca_category_{category_name}_{period} columns
-  # ('ca_category', secondary_product_categories, DEFAULT_AGGREGATION, []),
-  # ('ca_attribute', product_attributes, DEFAULT_AGGREGATION, []),
-  # ('nb_purchase_dates', [], ('datetime', F.countDistinct), []),
-  # ('nb_purchase_dates_category_', primary_product_categories, ('datetime', F.countDistinct), []),
-  # ('nb_purchase_dates_attribute_', product_attributes, ('datetime', F.countDistinct), []),
-  # ('quantity', [], ('quantity', F.sum), [F.col('quantity') > 0]),
-  # ('nb_distinct_products', [], ('product_id', F.countDistinct), []),
-  # ('nb_purchase_dates_web', [], ('datetime', F.countDistinct), [F.col('point_of_sales').isin(web_points_of_sales)]), # only bought in web stores
-  # ('nb_purchase_dates_store', [], ('datetime', F.countDistinct), [~F.col('point_of_sales').isin(web_points_of_sales)]), # not bought in web stores
-  # ('last_purchase_date', [], ('datetime', F.max), []),
-  # ('last_purchase_date_category', primary_product_categories, ('datetime', F.max), []),
-  # ('top_buyer', [], ('datetime', F.max), [F.col('quantity') > 0]), # not bought in web stores
+  ##### restricted_periods
+  # ('ca', restricted_periods, {}, DEFAULT_AGGREGATION, []),
+  # ('ca_category', restricted_periods, primary_product_categories, DEFAULT_AGGREGATION, []), # fe. this will result in ca_category_{category_name}_{period} columns
+  # ('ca_category', restricted_periods, secondary_product_categories, DEFAULT_AGGREGATION, []),
+  # ('ca_attribute', restricted_periods, product_attributes, DEFAULT_AGGREGATION, []),
+  # ('nb_purchase_dates', restricted_periods, {}, ('datetime', F.countDistinct), []),
+  # ('nb_purchase_dates_category_', restricted_periods, primary_product_categories, ('datetime', F.countDistinct), []),
+  # ('nb_purchase_dates_attribute_', restricted_periods, product_attributes, ('datetime', F.countDistinct), []),
+  # ('quantity', restricted_periods, {}, ('quantity', F.sum), [F.col('quantity') > 0]),
+  # ('nb_distinct_products', restricted_periods, {}, ('product_id', F.countDistinct), []),
+  # ('nb_purchase_dates_web', restricted_periods, {}, ('datetime', F.countDistinct), [F.col('point_of_sales').isin(web_points_of_sales)]), # only bought in web stores
+  # ('nb_purchase_dates_store', restricted_periods, {}, ('datetime', F.countDistinct), [~F.col('point_of_sales').isin(web_points_of_sales)]), # not bought in web stores
+  # ('last_purchase_date', restricted_periods, {}, ('datetime', F.max), []),
+  # ('last_purchase_date_category', restricted_periods, primary_product_categories, ('datetime', F.max), []),
+  
+  ##### periods
+  ('ca', periods, {}, DEFAULT_AGGREGATION, []),
+  ('nb_purchase_dates', periods, {}, ('datetime', F.countDistinct), []),
+  ('quantity', periods, {}, ('quantity', F.sum), [F.col('quantity') > 0]),
 ]
 
 # original definitions that are missing
@@ -138,10 +152,12 @@ df = (
 )
 
 res_df = None
-for period_name, period_n in restricted_periods: # across all the defined periods
-  for column_prefix, agg_columns, agg_def, extra_filters in AGGREGATIONS: # across all the predefined aggregations
-    for agg_col, whitelisted in agg_columns.items() if agg_columns else [None]: # perform 1 loop if there are no aggregation cols
+for column_prefix, periods, agg_columns, agg_def, extra_filters in AGGREGATIONS: # across all the predefined aggregations
+  agg_columns = agg_columns if agg_columns else {None: None} # perform 1 loop if there are no aggregation cols
+  for agg_col, whitelisted in agg_columns.items(): 
+    for period_name, period_n in periods: # across all the defined periods
       
+      # concatenate default settings with current aggregation settings
       group_cols = [PRIMARY_AGGREGATION_FIELD, agg_col] if agg_col else PRIMARY_AGGREGATION_FIELD
       filters = DEFAULT_FILTERS + extra_filters
 
@@ -179,19 +195,25 @@ for period_name, period_n in restricted_periods: # across all the defined period
 
 display(res_df.where(F.col('uid') == '746991')) # check for single user (with most purchases)
 # res_df = res_df.groupBy('uid').pivot('aggregation').agg(F.first('value')) # pivot table (except uid)
-
 # display(res_df.where(F.col('uid') == '608685'))
-
-
 
 # todo: extra columns from client table
 # todo: finalize all original aggregations on checklist
-# todo: restricted period vs. periods difference
 
 ###### questions
 # todo: fill null values??
 # todo: if there are no results found for particular aggregation for any user or period, the column will not be included in the result
 #       if there is result for at least single user, the column will be present in the final pivoted table (rest will be NULL)
+
+# COMMAND ----------
+
+for i in {}.items():
+  print(i)
+
+# COMMAND ----------
+
+for i in {}.items():
+  print(i)
 
 # COMMAND ----------
 
